@@ -20,7 +20,7 @@
 
 # This is the default. It can be overridden in the main Makefile after
 # including build.make.
-REGISTRY_NAME=quay.io/k8scsi
+REGISTRY_NAME=pyletime
 
 # Revision that gets built into each binary via the main.version
 # string. Uses the `git describe` output based on the most recent
@@ -30,6 +30,8 @@ REGISTRY_NAME=quay.io/k8scsi
 # Beware that tags may also be missing in shallow clones as done by
 # some CI systems (like TravisCI, which pulls only 50 commits).
 REV=$(shell git describe --long --tags --match='v*' --dirty 2>/dev/null || git rev-list -n1 HEAD)
+
+ARCHS=amd64 arm arm64
 
 # A space-separated list of image tags under which the current build is to be pushed.
 # Determined dynamically.
@@ -62,27 +64,37 @@ endif
 
 build-%:
 	mkdir -p bin
-	CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-X main.version=$(REV) -extldflags "-static"' -o ./bin/$* ./cmd/$*
+	GOARM=
+	for arch in $(ARCHS); do \
+		if [ "$$arch" = "arm" ] ; then \
+			GOARM="GOARM=7"; \
+		fi; \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch $(GOARM) go build -a -ldflags '-X main.version=$(REV) -extldflags "-static"' -o ./bin/$*-$$arch ./cmd/$*; \
+	done
 
 container-%: build-%
-	docker build -t $*:latest -f $(shell if [ -e ./cmd/$*/Dockerfile ]; then echo ./cmd/$*/Dockerfile; else echo Dockerfile; fi) --label revision=$(REV) .
+	for arch in $(ARCHS); do \
+		docker build -t $*-$$arch:latest --build-arg ARCH=$$arch -f $(shell if [ -e ./cmd/$*/Dockerfile ]; then echo ./cmd/$*/Dockerfile; else echo Dockerfile; fi) --label revision=$(REV) . ; \
+	done
 
 push-%: container-%
 	set -ex; \
 	push_image () { \
-		docker tag $*:latest $(IMAGE_NAME):$$tag; \
-		docker push $(IMAGE_NAME):$$tag; \
+		docker tag $*-$$arch:latest $(IMAGE_NAME)-$$arch:$$tag; \
+		docker push $(IMAGE_NAME)-$$arch:$$tag; \
 	}; \
 	for tag in $(IMAGE_TAGS); do \
-		if [ "$$tag" = "canary" ] || echo "$$tag" | grep -q -e '-canary$$'; then \
-			: "creating or overwriting canary image"; \
-			push_image; \
-		elif docker pull $(IMAGE_NAME):$$tag 2>&1 | tee /dev/stderr | grep -q "manifest for $(IMAGE_NAME):$$tag not found"; then \
-			: "creating release image"; \
-			push_image; \
-		else \
-			: "release image $(IMAGE_NAME):$$tag already exists, skipping push"; \
-		fi; \
+		for arch in $(ARCHS); do \
+			if [ "$$tag" = "canary" ] || echo "$$tag" | grep -q -e '-canary$$'; then \
+				: "creating or overwriting canary image"; \
+				push_image; \
+			elif docker pull $(IMAGE_NAME)-$$arch:$$tag 2>&1 | tee /dev/stderr | grep -q "manifest for $(IMAGE_NAME)-$$arch:$$tag not found"; then \
+				: "creating release image"; \
+				push_image; \
+			else \
+				: "release image $(IMAGE_NAME)-$$arch:$$tag already exists, skipping push"; \
+			fi; \
+		done; \
 	done
 
 build: $(CMDS:%=build-%)
